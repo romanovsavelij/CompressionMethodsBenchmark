@@ -1,0 +1,6 @@
+.idea/
+venv/
+.ipynb_checkpoints/
+*-compressed
+*-decompressed
+*.log
