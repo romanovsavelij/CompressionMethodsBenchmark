@@ -1,13 +1,18 @@
 import re
-import timeit
 import subprocess
 import os
 import pandas as pd
 from typing import List
 from statistics import median
+import base64
+import unicodedata
+import re
 
 # Define the codecs to test
-codecs = ['LZ4', 'ZSTD', 'BSC']
+# 'LZ4HC(4)', 'LZ4HC(6)', 'LZ4HC(9)', 'LZ4HC(12)'
+# 'ZSTD(1)', 'ZSTD(5)', 'ZSTD(10)', 'ZSTD(16)', 'ZSTD(22)'
+# 'DEFLATE_QPL'
+codecs = ['LZ4HC(4)', 'ZSTD', 'BSC']
 num_runs = 1  # Number of times to run each benchmark
 
 
@@ -20,52 +25,88 @@ def parse_user_space_time(input_str):
     return 60 * minutes + seconds
 
 
+def file_size_mb(filename):
+    st = os.stat(filename)
+    return st.st_size / (1024 * 1024)
+
+
+def to_filename(s):
+    return slugify(s)
+
+def slugify(value, allow_unicode=False):
+    """
+    Taken from https://github.com/django/django/blob/master/django/utils/text.py
+    Convert to ASCII if 'allow_unicode' is False. Convert spaces or repeated
+    dashes to single dashes. Remove characters that aren't alphanumerics,
+    underscores, or hyphens. Convert to lowercase. Also strip leading and
+    trailing whitespace, dashes, and underscores.
+    """
+    value = str(value)
+    if allow_unicode:
+        value = unicodedata.normalize('NFKC', value)
+    else:
+        value = unicodedata.normalize('NFKD', value).encode('ascii', 'ignore').decode('ascii')
+    value = re.sub(r'[^\w\s-]', '', value.lower())
+    return re.sub(r'[-\s]+', '-', value).strip('-_')
+
+
 def benchmark_files(files: List[str], output_format: str = 'markdown'):
     results = []
 
     for file in files:
+        print(f"file: {file}")
+        print(f"size: {file_size_mb(file)} mbs")
         for codec in codecs:
-            compress_times = []
-            decompress_times = []
+            compress_speed = []
+            decompress_speed = []
             for _ in range(num_runs):
                 _, filename = os.path.split(file)
 
                 # Compress the file
-                compress_command = f'(time clickhouse-compressor --codec "{codec}" < {file} > {filename}-{codec}-compressed) 2> time.log'
+                compress_input_file = file
+                compress_output_file = to_filename(f"{filename}-{codec}-compressed")
+                compress_command = f'(time clickhouse-compressor --codec "{codec}" < {compress_input_file} > {compress_output_file}) 2> time.log'
                 print(f'compress_command: {compress_command}')
                 subprocess.run(compress_command, shell=True)
                 with open('time.log', 'r') as f:
                     user_time = parse_user_space_time(''.join(f.readlines()))
-                    compress_times.append(user_time)
+                    print(f"compress time: {user_time}")
+                    compress_speed.append(file_size_mb(compress_input_file) / user_time)
 
                 # Decompress the file and check the result
-                decompress_command = f'(time clickhouse-compressor --decompress --codec "{codec}" < {filename}-{codec}-compressed > {filename}-{codec}-decompressed) 2> time.log'
+                decompress_input_file = compress_output_file
+                decompress_output_file = to_filename(f"{filename}-{codec}-decompressed")
+                decompress_command = f'(time clickhouse-compressor --decompress --codec "{codec}" < {decompress_input_file} > {decompress_output_file}) 2> time.log'
+                print(f'decompress_command: {decompress_command}')
                 subprocess.run(decompress_command, shell=True)
                 with open('time.log', 'r') as f:
                     user_time = parse_user_space_time(''.join(f.readlines()))
-                    decompress_times.append(user_time)
+                    print(f"decompress time: {user_time}")
+                    decompress_speed.append(file_size_mb(compress_input_file) / user_time)
 
             # Calculate the compression rate
             initial_size = os.path.getsize(file)
-            compressed_size = os.path.getsize(f'{filename}-{codec}-compressed')
+            compressed_size = os.path.getsize(compress_output_file)
             compression_rate = compressed_size / initial_size
 
             # Check if the decompressed file matches the original
-            match = subprocess.run(f'diff {file} {filename}-{codec}-decompressed',
+            match = subprocess.run(f'diff {file} {decompress_output_file}',
                                    shell=True).returncode == 0
+            if not match:
+                raise Exception(f'compressed-decompressed data does not equal original for codec={codec}, file={filename}')
 
             # Store the result
             results.append({
-                'File': file,
+                'File': filename,
                 'Codec': codec,
-                'Compress Time (s)': median(compress_times),
-                'Decompress Time (s)': median(decompress_times),
-                'Compression Rate': compression_rate,
-                'Match': match
+                'Compress Speed (mb/s)': median(compress_speed),
+                'Decompress Speed (mb/s)': median(decompress_speed),
+                'Ratio': 1.0 / compression_rate,
             })
 
     # Create a pandas DataFrame from the results
     df = pd.DataFrame(results)
+    df.reset_index(drop=True, inplace=True)
 
     # Output the results in the specified format
     if output_format == 'csv':
@@ -78,4 +119,5 @@ def benchmark_files(files: List[str], output_format: str = 'markdown'):
 
 if __name__ == '__main__':
     # '../store/7f2/7f28c961-5abb-4436-a2ff-329a2d8d0dac/201403_1_31_2/Title.bin'
-    benchmark_files(['tiny-data.txt'])
+    # 'tiny-data.txt'
+    benchmark_files(['tiny-data.txt', '../store/7f2/7f28c961-5abb-4436-a2ff-329a2d8d0dac/201403_1_31_2/Title.bin'])
