@@ -12,17 +12,17 @@ import re
 # 'LZ4HC(4)', 'LZ4HC(6)', 'LZ4HC(9)', 'LZ4HC(12)'
 # 'ZSTD(1)', 'ZSTD(5)', 'ZSTD(10)', 'ZSTD(16)', 'ZSTD(22)'
 # 'DEFLATE_QPL'
-codecs = ['LZ4HC(4)', 'ZSTD', 'BSC']
-num_runs = 1  # Number of times to run each benchmark
+codecs = ['BSC']
+num_runs = 3  # Number of times to run each benchmark
 
 
 def parse_user_space_time(input_str):
-    match = re.search(r'user\s(\d+)m(\d+\.\d+)s\s', input_str)
+    match = re.search(r'(\d+)\.(\d+)user', input_str)
     if not match:
         raise Exception('invalid time output')
-    minutes = float(match.group(1))
-    seconds = float(match.group(2))
-    return 60 * minutes + seconds
+    seconds = float(match.group(1))
+    second_frac = float(match.group(2))
+    return seconds + (second_frac / 100)
 
 
 def file_size_mb(filename):
@@ -65,7 +65,7 @@ def benchmark_files(files: List[str], output_format: str = 'markdown'):
                 # Compress the file
                 compress_input_file = file
                 compress_output_file = to_filename(f"{filename}-{codec}-compressed")
-                compress_command = f'(time clickhouse-compressor --codec "{codec}" < {compress_input_file} > {compress_output_file}) 2> time.log'
+                compress_command = f'(numactl --physcpubind=3 time clickhouse-compressor --codec "{codec}" < {compress_input_file} > {compress_output_file}) 2> time.log'
                 print(f'compress_command: {compress_command}')
                 subprocess.run(compress_command, shell=True)
                 with open('time.log', 'r') as f:
@@ -76,7 +76,7 @@ def benchmark_files(files: List[str], output_format: str = 'markdown'):
                 # Decompress the file and check the result
                 decompress_input_file = compress_output_file
                 decompress_output_file = to_filename(f"{filename}-{codec}-decompressed")
-                decompress_command = f'(time clickhouse-compressor --decompress --codec "{codec}" < {decompress_input_file} > {decompress_output_file}) 2> time.log'
+                decompress_command = f'(numactl --physcpubind=3 time clickhouse-compressor --decompress --codec "{codec}" < {decompress_input_file} > {decompress_output_file}) 2> time.log'
                 print(f'decompress_command: {decompress_command}')
                 subprocess.run(decompress_command, shell=True)
                 with open('time.log', 'r') as f:
@@ -107,17 +107,16 @@ def benchmark_files(files: List[str], output_format: str = 'markdown'):
     # Create a pandas DataFrame from the results
     df = pd.DataFrame(results)
     df.reset_index(drop=True, inplace=True)
+    df.to_csv('benchmark_results.csv', index=False)
 
     # Output the results in the specified format
-    if output_format == 'csv':
-        df.to_csv('benchmark_results.csv', index=False)
-    elif output_format == 'markdown':
+    if output_format == 'markdown':
         print(df.to_markdown())
     else:
         print(df)
 
 
 if __name__ == '__main__':
-    # '../store/7f2/7f28c961-5abb-4436-a2ff-329a2d8d0dac/201403_1_31_2/Title.bin'
     # 'tiny-data.txt'
-    benchmark_files(['tiny-data.txt', '../store/7f2/7f28c961-5abb-4436-a2ff-329a2d8d0dac/201403_1_31_2/Title.bin'])
+    # 'all-titles.bin', 'all-watch-ids-dup.bin', 'all-event-times-dup.bin', 'all-referer-regions-dup.bin'
+    benchmark_files(['all-titles.bin', 'all-watch-ids-dup.bin', 'all-event-times-dup.bin', 'all-referer-regions-dup.bin'])
